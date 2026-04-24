@@ -1,2 +1,2 @@
 # honors-thesis
-Honors thesis material, replication and potential changes to the paper.
+Honors thesis material, replication and potential changes to the paper. Currently work in progress.
