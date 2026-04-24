@@ -1,0 +1,144 @@
+import pandas as pd
+
+# Load
+completed = pd.read_csv("data/completed.csv", skiprows=[1, 2])
+returned = pd.read_csv("data/returned.csv", skiprows=[1, 2])
+
+
+    
+completed = completed[completed["Status"] != "Survey Preview"].copy()
+returned = returned[returned["Status"] != "Survey Preview"].copy()
+
+# --- Filter returned by Progress ---
+returned["Progress"] = pd.to_numeric(returned["Progress"], errors="coerce")
+mask_progress = returned["Progress"] != 63
+
+removed_progress = returned[mask_progress].copy()
+returned_filtered = returned[~mask_progress].copy()
+
+# --- Combine ---
+df = pd.concat([completed, returned_filtered], ignore_index=True)
+
+#remove my ip adress
+df = df[df["IPAddress"] != "71.195.93.164"]
+
+
+# --- Clean comprehension columns ---
+for col in ["allocation_2", "check"]: #don't actually need to clean allocation_2, gpt did tho
+    df[col] = (
+        df[col]
+        .astype(str)
+        .str.strip()
+        .str.replace("\xa0", "", regex=False)
+    )
+
+df["allocation_2"] = pd.to_numeric(df["allocation_2"], errors="coerce")
+df["check"] = pd.to_numeric(df["check"], errors="coerce")
+
+# --- Comprehension filter ---
+mask_comp_fail = df["check"] != df["allocation_2"]
+removed_comprehension = df[mask_comp_fail].copy()
+
+df = df[~mask_comp_fail].copy()
+
+# --- Allocation cleaning ---
+df["allocation_1"] = pd.to_numeric(df["allocation_1"], errors="coerce")
+
+
+# --- Categorize ---
+def categorize(x):
+    if x == 5:
+        return "fair" #fair
+    elif x > 5:
+        return "altruistic" #altruistic
+    else:
+        return "selfish" #selfish
+
+df["allocation_type"] = df["allocation_1"].apply(categorize)
+
+
+
+
+compare_map = {
+    "Much less than average": 1,
+    "Less than average": 2,
+    "Slightly less than average": 3,
+    "About the same as average": 4,
+    "Slightly more than average": 5,
+    "More than average": 6,
+    "Much more than average": 7
+}
+
+fair_map = {
+    "Very unfair": 1,
+    "Unfair": 2,
+    "Somewhat unfair": 3,
+    "Neither fair nor unfair": 4,
+    "Somewhat fair": 5,
+    "Fair": 6,
+    "Very Fair": 7
+}
+
+likert_map = {
+    "strongly disagree": 1,
+    "disagree": 2,
+    "somewhat disagree": 3,
+    "neither agree nor disagree": 4,
+    "somewhat agree": 5,
+    "agree": 6,
+    "strongly agree": 7
+}
+
+# --- Clean text BEFORE mapping ---
+def clean_text(series):
+    return (
+        series.astype(str)
+        .str.strip()
+        .str.replace("\xa0", "", regex=False)
+    )
+
+df["compare"] = clean_text(df["compare"])
+df["fair"] = clean_text(df["fair"])
+
+mag_cols = [
+    "magical_ideation1",
+    "magical_ideation2",
+    "magical_ideation3",
+    "magical_ideation4",
+    "magical_ideation5"
+]
+
+for col in mag_cols:
+    df[col] = clean_text(df[col]).str.lower()
+
+# --- Apply mappings ---
+df["compare_num"] = df["compare"].map(compare_map)
+df["fair_num"] = df["fair"].map(fair_map)
+
+for col in mag_cols:
+    df[col + "_num"] = df[col].map(likert_map)
+
+# --- Check for mapping errors ---
+print("\nMissing values after mapping:")
+print("compare:", df["compare_num"].isna().sum())
+print("fair:", df["fair_num"].isna().sum())
+
+for col in mag_cols:
+    print(f"{col}:", df[col + "_num"].isna().sum())
+
+# --- Optional: create magical ideation scale ---
+df["magical_ideation_score"] = df[
+    [col + "_num" for col in mag_cols]
+].mean(axis=1)
+
+
+
+# --- Save everything ---
+df.to_csv("data/cleaned_data.csv", index=False)
+
+
+#sanity checks
+#removed_progress.to_csv("data/removed_progress.csv", index=False)
+#removed_comprehension.to_csv("data/removed_comprehension.csv", index=False)
+
+print("Saved all datasets.")

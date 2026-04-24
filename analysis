@@ -1,0 +1,506 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import statsmodels.api as sm
+from statsmodels.formula.api import ols
+import sys
+from stargazer.stargazer import Stargazer
+
+# -------------------------
+# LOG FILE
+# -------------------------
+log_file = open("data/analysis_log.txt", "w")
+sys.stdout = log_file
+
+# -------------------------
+# LOAD DATA
+# -------------------------
+df = pd.read_csv("data/cleaned_data.csv")
+
+df["treatment"] = df["FL_50_DO"].astype(str).str.strip()
+df["actual_gave"] = pd.to_numeric(df["allocation_1"], errors="coerce")
+df["gave_share"] = df["actual_gave"] / 10
+
+analysis_vars = [
+    "treatment",
+    "actual_gave",
+    "gave_share",
+    "compare_num",
+    "fair_num",
+    "average_guess",
+    "magical_ideation_score"
+]
+
+df = df.dropna(subset=analysis_vars).copy()
+
+df["others_minus_self"] = df["average_guess"] - df["actual_gave"]
+
+df["magic_raw"] = df["magical_ideation_score"]
+df["magic_z"] = (df["magic_raw"] - df["magic_raw"].mean()) / df["magic_raw"].std()
+
+df = df.dropna(subset=["others_minus_self", "magic_z"]).copy()
+
+print("\n=== NA CHECK ===")
+print(df[[
+    "treatment",
+    "actual_gave",
+    "gave_share",
+    "compare_num",
+    "fair_num",
+    "average_guess",
+    "others_minus_self",
+    "magic_raw",
+    "magic_z"
+]].isna().sum())
+
+print("\n=== Giving distribution ===")
+print(df["actual_gave"].describe())
+
+print("\n=== Treatment counts ===")
+print(df["treatment"].value_counts())
+
+# -------------------------
+# LATEX HELPERS
+# -------------------------
+def save_aer_table(table, path, caption, label, notes=None):
+    clean = table.copy()
+    clean = clean.replace([np.inf, -np.inf], np.nan)
+    clean = clean.fillna("")
+
+    latex = clean.to_latex(
+        index=False,
+        escape=False,
+        float_format="%.3f"
+    )
+
+    latex = latex.replace("\\toprule", "\\hline\\hline")
+    latex = latex.replace("\\midrule", "\\hline")
+    latex = latex.replace("\\bottomrule", "\\hline")
+
+    out = []
+    out.append("\\begin{table}[!htbp]\\centering")
+    out.append(f"\\caption{{{caption}}}")
+    out.append(f"\\label{{{label}}}")
+    out.append(latex)
+
+    if notes:
+        out.append("\\begin{minipage}{0.90\\textwidth}")
+        out.append("\\vspace{0.5em}")
+        out.append(f"\\footnotesize \\textit{{Notes:}} {notes}")
+        out.append("\\end{minipage}")
+
+    out.append("\\end{table}")
+
+    with open(path, "w") as f:
+        f.write("\n".join(out))
+
+
+def save_stargazer_table(stargazer_obj, path):
+    latex = stargazer_obj.render_latex()
+    latex = latex.replace(
+        "\\begin{table}[!htbp] \\centering",
+        "\\begin{table}[!htbp]\\centering"
+    )
+    with open(path, "w") as f:
+        f.write(latex)
+
+# -------------------------
+# 1. DESCRIPTIVE TABLES
+# -------------------------
+outcomes = [
+    "actual_gave",
+    "gave_share",
+    "compare_num",
+    "fair_num",
+    "average_guess",
+    "others_minus_self",
+    "magic_raw"
+]
+
+summary_table = (
+    df[outcomes]
+    .agg(["mean", "std", "min", "max", "count"])
+    .T
+    .reset_index()
+    .rename(columns={"index": "variable"})
+)
+
+print("\n=== Summary statistics ===")
+print(summary_table)
+
+summary_table.to_csv("data/summary_statistics.csv", index=False)
+
+save_aer_table(
+    summary_table,
+    "data/summary_statistics.tex",
+    "Summary Statistics",
+    "tab:summary_statistics",
+    "This table reports summary statistics for the main behavioral and self-report variables."
+)
+
+# By treatment descriptive tables
+for y in outcomes:
+    table = (
+        df.groupby("treatment")[y]
+        .agg(["mean", "std", "count"])
+        .reset_index()
+    )
+
+    table["se"] = table["std"] / np.sqrt(table["count"])
+    table["ci95"] = 1.96 * table["se"]
+
+    print(f"\n=== Treatment means for {y} ===")
+    print(table)
+
+    table.to_csv(f"data/{y}_by_treatment.csv", index=False)
+
+    save_aer_table(
+        table,
+        f"data/{y}_by_treatment.tex",
+        f"{y} by Treatment",
+        f"tab:{y}_by_treatment",
+        "This table reports means, standard deviations, and 95 percent confidence intervals by treatment condition."
+    )
+
+# -------------------------
+# 2. MAIN CONTINUOUS REGRESSIONS
+# -------------------------
+primary_outcomes = ["compare_num", "fair_num", "average_guess"]
+
+models_treatment_only = []
+models_main = []
+models_interact = []
+
+for y in primary_outcomes:
+    m0 = ols(
+        f"{y} ~ C(treatment)",
+        data=df
+    ).fit(cov_type="HC1")
+
+    m1 = ols(
+        f"{y} ~ C(treatment) + gave_share",
+        data=df
+    ).fit(cov_type="HC1")
+
+    m2 = ols(
+        f"{y} ~ C(treatment) * gave_share",
+        data=df
+    ).fit(cov_type="HC1")
+
+    models_treatment_only.append(m0)
+    models_main.append(m1)
+    models_interact.append(m2)
+
+    print(f"\n=== Treatment-only regression for {y} ===")
+    print(m0.summary())
+
+    print(f"\n=== Main continuous regression for {y} ===")
+    print(m1.summary())
+
+    print(f"\n=== Treatment x giving regression for {y} ===")
+    print(m2.summary())
+
+stargazer_treatment_only = Stargazer(models_treatment_only)
+stargazer_treatment_only.title("Treatment Effects on Primary Outcomes")
+stargazer_treatment_only.custom_columns(
+    ["Relative Self-Assessment", "Fairness Rating", "Belief About Average Giving"],
+    [1, 1, 1]
+)
+stargazer_treatment_only.dependent_variable_name("")
+save_stargazer_table(
+    stargazer_treatment_only,
+    "data/regression_treatment_only.tex"
+)
+
+stargazer_main = Stargazer(models_main)
+stargazer_main.title("Treatment and Giving as Predictors of Self-Evaluation")
+stargazer_main.custom_columns(
+    ["Relative Self-Assessment", "Fairness Rating", "Belief About Average Giving"],
+    [1, 1, 1]
+)
+stargazer_main.dependent_variable_name("")
+save_stargazer_table(
+    stargazer_main,
+    "data/regression_main_continuous.tex"
+)
+
+stargazer_interact = Stargazer(models_interact)
+stargazer_interact.title("Interaction Between Treatment and Giving")
+stargazer_interact.custom_columns(
+    ["Relative Self-Assessment", "Fairness Rating", "Belief About Average Giving"],
+    [1, 1, 1]
+)
+stargazer_interact.dependent_variable_name("")
+save_stargazer_table(
+    stargazer_interact,
+    "data/regression_interact_continuous.tex"
+)
+
+# -------------------------
+# 3. NORM GAP MODELS
+# -------------------------
+m_gap_treatment = ols(
+    "others_minus_self ~ C(treatment)",
+    data=df
+).fit(cov_type="HC1")
+
+m_gap_main = ols(
+    "others_minus_self ~ C(treatment) + gave_share + magic_z",
+    data=df
+).fit(cov_type="HC1")
+
+m_gap_interact = ols(
+    "others_minus_self ~ C(treatment) * gave_share + magic_z",
+    data=df
+).fit(cov_type="HC1")
+
+print("\n=== Norm gap treatment-only model ===")
+print(m_gap_treatment.summary())
+
+print("\n=== Norm gap main model ===")
+print(m_gap_main.summary())
+
+print("\n=== Norm gap interaction model ===")
+print(m_gap_interact.summary())
+
+stargazer_gap = Stargazer([m_gap_treatment, m_gap_main, m_gap_interact])
+stargazer_gap.title("Predictors of Perceived Giving Norm Gap")
+stargazer_gap.custom_columns(
+    ["Treatment Only", "Main Model", "Interaction Model"],
+    [1, 1, 1]
+)
+stargazer_gap.dependent_variable_name("Others Minus Self")
+save_stargazer_table(
+    stargazer_gap,
+    "data/regression_norm_gap.tex"
+)
+
+# -------------------------
+# 4. MAGICAL IDEATION MODELS
+# -------------------------
+magic_models = []
+
+for y in primary_outcomes:
+    m = ols(
+        f"{y} ~ C(treatment) + gave_share + magic_z",
+        data=df
+    ).fit(cov_type="HC1")
+
+    magic_models.append(m)
+
+    print(f"\n=== Magical ideation model for {y} ===")
+    print(m.summary())
+
+m_magic_interact = ols(
+    "others_minus_self ~ C(treatment) * magic_z + gave_share",
+    data=df
+).fit(cov_type="HC1")
+
+print("\n=== Treatment x magical ideation model for norm gap ===")
+print(m_magic_interact.summary())
+
+stargazer_magic = Stargazer(magic_models + [m_magic_interact])
+stargazer_magic.title("Magical Ideation and Retrospective Evaluation")
+stargazer_magic.custom_columns(
+    [
+        "Relative Self-Assessment",
+        "Fairness Rating",
+        "Belief About Average Giving",
+        "Norm Gap"
+    ],
+    [1, 1, 1, 1]
+)
+stargazer_magic.dependent_variable_name("")
+save_stargazer_table(
+    stargazer_magic,
+    "data/regression_magic.tex"
+)
+
+# -------------------------
+# 5. ANOVA-STYLE MODEL COMPARISONS
+# -------------------------
+for y in primary_outcomes + ["others_minus_self"]:
+    model = ols(
+        f"{y} ~ C(treatment) * gave_share",
+        data=df
+    ).fit()
+
+    anova_table = sm.stats.anova_lm(model, typ=2).reset_index()
+    anova_table = anova_table.rename(columns={"index": "term"})
+
+    print(f"\n=== ANOVA-style table for {y} ===")
+    print(anova_table)
+
+    anova_table.to_csv(f"data/{y}_continuous_anova.csv", index=False)
+
+    save_aer_table(
+        anova_table,
+        f"data/{y}_continuous_anova.tex",
+        f"ANOVA-Style Results for {y}",
+        f"tab:{y}_continuous_anova",
+        "Type II ANOVA table from a model including treatment, continuous giving share, and their interaction."
+    )
+
+# -------------------------
+# 6. FIGURES
+# -------------------------
+
+# Giving distribution
+plt.figure(figsize=(7, 5))
+plt.hist(df["actual_gave"], bins=np.arange(-0.5, 10.6, 1), density=False)
+plt.xlabel("Amount given in dictator game")
+plt.ylabel("Number of participants")
+plt.title("Distribution of Dictator Game Giving")
+plt.tight_layout()
+plt.savefig("data/giving_distribution.png", dpi=300)
+plt.close()
+
+# Norm gap histogram
+plt.figure(figsize=(7, 5))
+plt.hist(df["others_minus_self"], bins=15, density=True)
+plt.axvline(0, linestyle="--")
+plt.xlabel("Believed average giving of others minus own giving")
+plt.ylabel("Density")
+plt.title("Perceived Giving Norm Gap")
+plt.tight_layout()
+plt.savefig("data/others_minus_self_histogram.png", dpi=300)
+plt.close()
+
+# Norm gap histogram by treatment
+plt.figure(figsize=(7, 5))
+
+for treatment_name, group in df.groupby("treatment"):
+    plt.hist(
+        group["others_minus_self"],
+        bins=15,
+        density=True,
+        alpha=0.45,
+        label=treatment_name
+    )
+
+plt.axvline(0, linestyle="--")
+plt.xlabel("Believed average giving of others minus own giving")
+plt.ylabel("Density")
+plt.title("Perceived Giving Norm Gap by Treatment")
+plt.legend()
+plt.tight_layout()
+plt.savefig("data/others_minus_self_histogram_by_treatment.png", dpi=300)
+plt.close()
+
+# Giving and self-assessed generosity
+plt.figure(figsize=(7, 5))
+
+for treatment_name, group in df.groupby("treatment"):
+    plt.scatter(
+        group["gave_share"],
+        group["compare_num"],
+        alpha=0.6,
+        label=treatment_name
+    )
+
+    x = np.linspace(df["gave_share"].min(), df["gave_share"].max(), 100)
+    temp = pd.DataFrame({
+        "gave_share": x,
+        "treatment": treatment_name
+    })
+    yhat = models_interact[0].predict(temp)
+    plt.plot(x, yhat)
+
+plt.xlabel("Share of endowment given")
+plt.ylabel("Relative self-assessment")
+plt.title("Giving and Self-Assessed Generosity")
+plt.legend()
+plt.tight_layout()
+plt.savefig("data/giving_vs_self_assessment.png", dpi=300)
+plt.close()
+
+# Giving and fairness rating
+plt.figure(figsize=(7, 5))
+
+for treatment_name, group in df.groupby("treatment"):
+    plt.scatter(
+        group["gave_share"],
+        group["fair_num"],
+        alpha=0.6,
+        label=treatment_name
+    )
+
+    x = np.linspace(df["gave_share"].min(), df["gave_share"].max(), 100)
+    temp = pd.DataFrame({
+        "gave_share": x,
+        "treatment": treatment_name
+    })
+    yhat = models_interact[1].predict(temp)
+    plt.plot(x, yhat)
+
+plt.xlabel("Share of endowment given")
+plt.ylabel("Fairness rating")
+plt.title("Giving and Fairness Ratings")
+plt.legend()
+plt.tight_layout()
+plt.savefig("data/giving_vs_fairness.png", dpi=300)
+plt.close()
+
+# Giving and perceived norm gap
+plt.figure(figsize=(7, 5))
+
+for treatment_name, group in df.groupby("treatment"):
+    plt.scatter(
+        group["gave_share"],
+        group["others_minus_self"],
+        alpha=0.6,
+        label=treatment_name
+    )
+
+    x = np.linspace(df["gave_share"].min(), df["gave_share"].max(), 100)
+    temp = pd.DataFrame({
+        "gave_share": x,
+        "treatment": treatment_name,
+        "magic_z": 0
+    })
+    yhat = m_gap_interact.predict(temp)
+    plt.plot(x, yhat)
+
+plt.axhline(0, linestyle="--")
+plt.xlabel("Share of endowment given")
+plt.ylabel("Believed average giving of others minus own giving")
+plt.title("Giving and Perceived Norm Gap")
+plt.legend()
+plt.tight_layout()
+plt.savefig("data/giving_vs_norm_gap.png", dpi=300)
+plt.close()
+
+# Magical ideation and norm gap
+plt.figure(figsize=(7, 5))
+
+for treatment_name, group in df.groupby("treatment"):
+    plt.scatter(
+        group["magic_z"],
+        group["others_minus_self"],
+        alpha=0.6,
+        label=treatment_name
+    )
+
+    x = np.linspace(df["magic_z"].min(), df["magic_z"].max(), 100)
+    temp = pd.DataFrame({
+        "magic_z": x,
+        "treatment": treatment_name,
+        "gave_share": df["gave_share"].mean()
+    })
+    yhat = m_magic_interact.predict(temp)
+    plt.plot(x, yhat)
+
+plt.axhline(0, linestyle="--")
+plt.xlabel("Magical ideation score, standardized")
+plt.ylabel("Believed average giving of others minus own giving")
+plt.title("Magical Ideation and Perceived Norm Gap")
+plt.legend()
+plt.tight_layout()
+plt.savefig("data/magic_vs_norm_gap.png", dpi=300)
+plt.close()
+
+# -------------------------
+# CLOSE LOG
+# -------------------------
+sys.stdout = sys.__stdout__
+log_file.close()
